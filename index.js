@@ -1,25 +1,26 @@
 import express from "express";
-import { mongoClient, ObjectId } from "mongodb";
+import { MongoClient } from "mongodb";
 import cors from "cors";
-import Joi from "joi";
-import dotenv from "dotenv";
+import joi from "joi";
 import dayjs from "dayjs";
+import dotenv from "dotenv";
 dotenv.config();
-
-const mongoClient = new MongoClient(process.env.MONGO_URI);
-let db;
-mongoClient.connect(() => {
-  db = mongoClient.db("bate_papo_uol");
-});
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const mongoClient = new MongoClient(process.env.MONGO_URI);
+let db;
+
+mongoClient.connect().then(() => {
+  db = mongoClient.db("bate_papo_uol");
+});
+
 const messageSchema = joi.object({
   to: joi.string().required(),
   text: joi.string().required(),
-  type: joi.string("message" || "private_message").required(),
+  type: joi.string().valid("message", "private_message").required(),
 });
 
 const participantsSchema = joi.object({
@@ -35,7 +36,10 @@ app.post("/participants", async (req, res) => {
     return;
   }
   try {
-    if (!(await db.collection("participants").findOne({ user }))) {
+    const part = await db
+      .collection("participants")
+      .findOne({ name: user.name });
+    if (part) {
       res.sendStatus(409);
       return;
     }
@@ -48,7 +52,7 @@ app.post("/participants", async (req, res) => {
         to: "Todos",
         text: "entra na sala...",
         type: "status",
-        time: dayjs().format("HH/mm/ss"),
+        time: dayjs().format("HH:mm:ss"),
       });
       res.sendStatus(201);
     } catch (error) {
@@ -84,7 +88,6 @@ app.post("/messages", async (req, res) => {
     res.sendStatus(422);
     return;
   }
-
   try {
     if (!(await db.collection("participants").findOne({ name: user }))) {
       res.sendStatus(409);
@@ -94,7 +97,7 @@ app.post("/messages", async (req, res) => {
       await db.collection("messages").insertOne({
         ...message,
         from: user,
-        time: dayjs().format("HH/mm/ss"),
+        time: dayjs().format("HH:mm:ss"),
       });
       res.sendStatus(201);
     } catch (error) {
@@ -115,17 +118,18 @@ app.get("/messages", async (req, res) => {
   const limit = parseInt(req.query.limit);
   const user = req.headers.user;
   try {
-    const messages = await bd
+    const messages = await db
       .collection("messages")
-      .find({ to: "Todos" } || { from: user } || { to: user })
+      .find({ $or: [{ to: "Todos" }, { from: user }, { to: user }] })
       .toArray();
     if (limit) {
       const limitMessages = messages.slice(-limit);
       res.send(limitMessages);
+      return;
     }
     res.send(messages);
   } catch (error) {
-    console.error(err);
+    console.error(error);
     res
       .status(500)
       .send("Problema do servidor ao listar as mensagens do usuario");
@@ -135,11 +139,13 @@ app.get("/messages", async (req, res) => {
 app.post("/status", async (req, res) => {
   const user = req.headers.user;
   try {
-    if (!db.collection("participants").find({ name: user })) {
+    if (!db.collection("participants").findOne({ name: user })) {
       res.sendStatus(404);
       return;
     }
-    //falta atualizar o last status do participante
+    await db
+      .collection("participants")
+      .updateOne({ name: user }, { $set: { lastStatus: Date.now() } });
     res.sendStatus(200);
   } catch (error) {
     console.error(err);
@@ -149,7 +155,29 @@ app.post("/status", async (req, res) => {
   }
 });
 
-//falta remover automaticamente usuarios inativos
+setInterval(async () => {
+  try {
+    const participants = await db.collection("participants").find().toArray();
+    const inactivesPart = participants.filter(
+      (participant) => Date.now() - participant.lastStatus > 10000
+    );
+    inactivesPart.forEach(async (part) => {
+      await db.collection("participants").deleteOne(part);
+      await db.collection("messages").insertOne({
+        from: part.name,
+        to: "Todos",
+        text: "sai da sala...",
+        type: "status",
+        time: dayjs().format("HH:mm:ss"),
+      });
+    });
+  } catch (error) {
+    console.error(err);
+    res
+      .status(500)
+      .send("Problema do servidor ao atualizar o status de todos usuarios");
+  }
+}, 15000);
 
 app.listen(5000, () => {
   console.log("Server is litening on port 5000.");
